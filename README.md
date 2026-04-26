@@ -1,0 +1,2 @@
+# usb3bluetooth
+S3Stampを使用して有線キーボード、マウスをbluetoothで接続できるようにする物です。
