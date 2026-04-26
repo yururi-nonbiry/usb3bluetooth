@@ -1,10 +1,9 @@
 #include <Arduino.h>
-#include <BleKeyboard.h>
-#include <BleMouse.h>
 #include <EspUsbHost.h>
 #include <Adafruit_NeoPixel.h>
 #include <Preferences.h>
 #include <NimBLEDevice.h>
+#include <NimBLEHIDDevice.h>
 
 // Pins for M5Stamp S3
 #define PIN_LED 21
@@ -13,12 +12,12 @@
 // Global state
 Preferences preferences;
 int currentSlot = 0;
-bool isConnected = false;
+uint16_t slotConnHandles[4] = {0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF};
 
-// BLE Device Objects (Pointers to allow dynamic naming)
-BleKeyboard* bleKeyboard = nullptr;
-BleMouse* bleMouse = nullptr;
 Adafruit_NeoPixel pixels(1, PIN_LED, NEO_GRB + NEO_KHZ800);
+NimBLEHIDDevice* hid = nullptr;
+NimBLECharacteristic* inputKeyboard = nullptr;
+NimBLECharacteristic* inputMouse = nullptr;
 
 // Slot Colors: 1:Red, 2:Blue, 3:Yellow, 4:Green
 uint32_t getSlotColor(int slot) {
@@ -31,22 +30,55 @@ uint32_t getSlotColor(int slot) {
   }
 }
 
+// BLE Callbacks
+class MyServerCallbacks : public NimBLEServerCallbacks {
+  void onConnect(NimBLEServer* pServer, NimBLEConnInfo& connInfo) override {
+    Serial.printf("Connected: %s\n", connInfo.getAddress().toString().c_str());
+    
+    // Assign to an empty slot, prioritizing current slot if it's empty
+    if (slotConnHandles[currentSlot] == 0xFFFF) {
+        slotConnHandles[currentSlot] = connInfo.getConnHandle();
+    } else {
+        for (int i = 0; i < 4; i++) {
+            if (slotConnHandles[i] == 0xFFFF) {
+                slotConnHandles[i] = connInfo.getConnHandle();
+                break;
+            }
+        }
+    }
+  }
+
+  void onDisconnect(NimBLEServer* pServer, NimBLEConnInfo& connInfo, int reason) override {
+    Serial.printf("Disconnected, reason: %d\n", reason);
+    uint16_t handle = connInfo.getConnHandle();
+    for (int i = 0; i < 4; i++) {
+        if (slotConnHandles[i] == handle) {
+            slotConnHandles[i] = 0xFFFF;
+        }
+    }
+    // Restart advertising to allow others to connect
+    NimBLEDevice::getAdvertising()->start();
+  }
+};
+
 class MyUsbHost : public EspUsbHost {
 public:
   void onKeyboardKey(uint8_t ascii, uint8_t keycode, uint8_t modifier) override {
-    if (bleKeyboard && bleKeyboard->isConnected()) {
-      if (ascii != 0) {
-        bleKeyboard->write(ascii);
-      }
+    uint16_t handle = slotConnHandles[currentSlot];
+    if (handle != 0xFFFF && inputKeyboard) {
+        uint8_t report[8] = {modifier, 0, keycode, 0, 0, 0, 0, 0};
+        inputKeyboard->notify(report, sizeof(report), handle);
+        // Release key immediately for simplicity in this USB bridge
+        uint8_t release[8] = {0};
+        inputKeyboard->notify(release, sizeof(release), handle);
     }
   }
 
   void onMouseAction(uint8_t buttons, int8_t x, int8_t y, int8_t wheel) override {
-    if (bleMouse && bleMouse->isConnected()) {
-      bleMouse->move(x, y, wheel);
-      if (buttons & 0x01) bleMouse->press(MOUSE_LEFT); else bleMouse->release(MOUSE_LEFT);
-      if (buttons & 0x02) bleMouse->press(MOUSE_RIGHT); else bleMouse->release(MOUSE_RIGHT);
-      if (buttons & 0x04) bleMouse->press(MOUSE_MIDDLE); else bleMouse->release(MOUSE_MIDDLE);
+    uint16_t handle = slotConnHandles[currentSlot];
+    if (handle != 0xFFFF && inputMouse) {
+        uint8_t report[4] = {buttons, (uint8_t)x, (uint8_t)y, (uint8_t)wheel};
+        inputMouse->notify(report, sizeof(report), handle);
     }
   }
 };
@@ -57,21 +89,17 @@ void updateLED() {
   static unsigned long lastMillis = 0;
   static bool toggle = false;
   
-  bool connected = (bleKeyboard && bleKeyboard->isConnected());
+  uint16_t handle = slotConnHandles[currentSlot];
+  bool connected = (handle != 0xFFFF);
   uint32_t color = getSlotColor(currentSlot);
 
   if (connected) {
-    pixels.setPixelColor(0, color); // Solid color when connected
+    pixels.setPixelColor(0, color); 
   } else {
-    // Blinking when pairing/not connected
     if (millis() - lastMillis > 500) {
       lastMillis = millis();
       toggle = !toggle;
-      if (toggle) {
-        pixels.setPixelColor(0, color);
-      } else {
-        pixels.setPixelColor(0, pixels.Color(0, 0, 0));
-      }
+      pixels.setPixelColor(0, toggle ? color : 0);
     }
   }
   pixels.show();
@@ -87,27 +115,20 @@ void handleButton() {
   } else if (lastState == LOW && currentState == HIGH) {
     unsigned long duration = millis() - pressStart;
     if (duration > 2000) {
-      // Long press: Pairing mode (Clear bonds for current slot)
-      Serial.println("Long press: Clearing bonds and entering pairing mode...");
-      // Rapid blink to acknowledge
+      Serial.println("Long press: Clearing all bonds...");
       for(int i=0; i<10; i++) {
-        pixels.setPixelColor(0, getSlotColor(currentSlot)); pixels.show(); delay(50);
+        pixels.setPixelColor(0, pixels.Color(100, 100, 100)); pixels.show(); delay(50);
         pixels.setPixelColor(0, 0); pixels.show(); delay(50);
       }
-      NimBLEDevice::deleteAllBonds(); // Note: This clears ALL bonds. 
-      // For slot-specific clearing, it would be more complex, 
-      // but usually users want a fresh start.
+      NimBLEDevice::deleteAllBonds();
       ESP.restart();
     } else if (duration > 50) {
-      // Short press: Switch device slot
       currentSlot = (currentSlot + 1) % 4;
       preferences.putInt("slot", currentSlot);
-      Serial.printf("Short press: Switching to slot %d\n", currentSlot + 1);
-      
-      // Feedback blink
-      pixels.setPixelColor(0, getSlotColor(currentSlot)); pixels.show();
-      delay(200);
-      ESP.restart();
+      Serial.printf("Slot switched to %d\n", currentSlot + 1);
+      // Small blink for feedback
+      pixels.setPixelColor(0, pixels.Color(50, 50, 50)); pixels.show();
+      delay(100);
     }
   }
   lastState = currentState;
@@ -120,26 +141,41 @@ void setup() {
   pixels.begin();
   pixels.setBrightness(40);
   
-  // Load slot from preferences
   preferences.begin("ble-adapter", false);
   currentSlot = preferences.getInt("slot", 0);
-  
-  // Set a unique MAC address for each slot so they appear as separate devices
-  uint8_t mac[6];
-  esp_read_mac(mac, ESP_MAC_BT);
-  mac[5] = (mac[5] & 0xFC) | currentSlot; // Modify last 2 bits
-  esp_base_mac_addr_set(mac);
 
-  String name = "M5 Keyboard Slot " + String(currentSlot + 1);
-  Serial.println("Starting BLE " + name);
-  
-  bleKeyboard = new BleKeyboard(name.c_str(), "M5Stack", 100);
-  bleMouse = new BleMouse(name.c_str(), "M5Stack", 100);
-  
-  bleKeyboard->begin();
-  bleMouse->begin();
-  
-  Serial.println("Starting USB Host...");
+  NimBLEDevice::init("M5 Multi Keyboard");
+  NimBLEServer* pServer = NimBLEDevice::createServer();
+  pServer->setCallbacks(new MyServerCallbacks());
+
+  hid = new NimBLEHIDDevice(pServer);
+  inputKeyboard = hid->inputReport(1); // Report ID 1: Keyboard
+  inputMouse = hid->inputReport(2);    // Report ID 2: Mouse
+
+  hid->manufacturer()->setValue("M5Stack");
+  hid->pnp(0x02, 0xe502, 0xa111, 0x0210);
+  hid->hidInfo(0x00, 0x01);
+
+  // USB HID Report Map for Keyboard + Mouse
+  const uint8_t reportMap[] = {
+    0x05, 0x01, 0x09, 0x06, 0xa1, 0x01, 0x85, 0x01, 0x05, 0x07, 0x19, 0xe0, 0x29, 0xe7, 0x15, 0x00,
+    0x25, 0x01, 0x75, 0x01, 0x95, 0x08, 0x81, 0x02, 0x95, 0x01, 0x75, 0x08, 0x81, 0x01, 0x95, 0x06,
+    0x75, 0x08, 0x15, 0x00, 0x25, 0x65, 0x19, 0x00, 0x29, 0x65, 0x81, 0x00, 0xc0,
+    0x05, 0x01, 0x09, 0x02, 0xa1, 0x01, 0x85, 0x02, 0x09, 0x01, 0xa1, 0x00, 0x05, 0x09, 0x19, 0x01,
+    0x29, 0x03, 0x15, 0x00, 0x25, 0x01, 0x95, 0x03, 0x75, 0x01, 0x81, 0x02, 0x95, 0x01, 0x75, 0x05,
+    0x81, 0x03, 0x05, 0x01, 0x09, 0x30, 0x09, 0x31, 0x09, 0x38, 0x15, 0x81, 0x25, 0x7f, 0x75, 0x08,
+    0x95, 0x03, 0x81, 0x06, 0xc0, 0xc0
+  };
+  hid->reportMap((uint8_t*)reportMap, sizeof(reportMap));
+  hid->startServices();
+
+  NimBLEAdvertising* pAdvertising = NimBLEDevice::getAdvertising();
+  pAdvertising->setAppearance(HID_KEYBOARD);
+  pAdvertising->addServiceUUID(hid->hidService()->getUUID());
+  pAdvertising->setScanResponse(false);
+  pAdvertising->start();
+
+  Serial.println("BLE Multi-HID Ready");
   usbHost.begin();
 }
 
@@ -147,4 +183,4 @@ void loop() {
   usbHost.task();
   handleButton();
   updateLED();
-}
+}
