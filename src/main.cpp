@@ -30,6 +30,18 @@ uint32_t getSlotColor(int slot) {
   }
 }
 
+void switchToSlot(int slot) {
+  if (slot < 0 || slot >= 4) return;
+  currentSlot = slot;
+  preferences.putInt("slot", currentSlot);
+  Serial.printf("Switching to slot %d\n", currentSlot + 1);
+  
+  // Feedback blink
+  pixels.setPixelColor(0, pixels.Color(100, 100, 100));
+  pixels.show();
+  delay(100);
+}
+
 // BLE Callbacks
 class MyServerCallbacks : public NimBLEServerCallbacks {
   void onConnect(NimBLEServer* pServer, NimBLEConnInfo& connInfo) override {
@@ -64,6 +76,19 @@ class MyServerCallbacks : public NimBLEServerCallbacks {
 class MyUsbHost : public EspUsbHost {
 public:
   void onKeyboardKey(uint8_t ascii, uint8_t keycode, uint8_t modifier) override {
+    // Intercept switching keys
+    bool isAlt = (modifier & 0x04) || (modifier & 0x40); // Left Alt or Right Alt
+    
+    if (keycode >= 0x68 && keycode <= 0x6B) { // F13 - F16
+      switchToSlot(keycode - 0x68);
+      return;
+    } 
+    
+    if (isAlt && (keycode >= 0x3A && keycode <= 0x3D)) { // Alt + F1-F4
+      switchToSlot(keycode - 0x3A);
+      return;
+    }
+
     uint16_t handle = slotConnHandles[currentSlot];
     if (handle != 0xFFFF && inputKeyboard) {
         uint8_t report[8] = {modifier, 0, keycode, 0, 0, 0, 0, 0};
@@ -123,12 +148,7 @@ void handleButton() {
       NimBLEDevice::deleteAllBonds();
       ESP.restart();
     } else if (duration > 50) {
-      currentSlot = (currentSlot + 1) % 4;
-      preferences.putInt("slot", currentSlot);
-      Serial.printf("Slot switched to %d\n", currentSlot + 1);
-      // Small blink for feedback
-      pixels.setPixelColor(0, pixels.Color(50, 50, 50)); pixels.show();
-      delay(100);
+      switchToSlot((currentSlot + 1) % 4);
     }
   }
   lastState = currentState;
