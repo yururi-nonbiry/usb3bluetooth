@@ -13,11 +13,16 @@
 Preferences preferences;
 int currentSlot = 0;
 uint16_t slotConnHandles[4] = {0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF};
+NimBLEAddress slotAddresses[4];
 
 Adafruit_NeoPixel pixels(1, PIN_LED, NEO_GRB + NEO_KHZ800);
 NimBLEHIDDevice* hid = nullptr;
 NimBLECharacteristic* inputKeyboard = nullptr;
 NimBLECharacteristic* inputMouse = nullptr;
+
+// Release reports
+const uint8_t keyboardRelease[8] = {0};
+const uint8_t mouseRelease[5] = {0};
 
 // Slot Colors: 1:Red, 2:Blue, 3:Yellow, 4:Green
 uint32_t getSlotColor(int slot) {
@@ -30,80 +35,128 @@ uint32_t getSlotColor(int slot) {
   }
 }
 
+void sendReleaseAll(uint16_t handle) {
+  if (handle != 0xFFFF) {
+    if (inputKeyboard) inputKeyboard->notify(keyboardRelease, sizeof(keyboardRelease), handle);
+    if (inputMouse) inputMouse->notify(mouseRelease, sizeof(mouseRelease), handle);
+  }
+}
+
 void switchToSlot(int slot) {
   if (slot < 0 || slot >= 4) return;
+  if (currentSlot == slot) return;
+  
+  // Send release to current slot before switching to prevent stuck keys
+  sendReleaseAll(slotConnHandles[currentSlot]);
+  
   currentSlot = slot;
   preferences.putInt("slot", currentSlot);
   Serial.printf("Switching to slot %d\n", currentSlot + 1);
   
   // Feedback blink
-  pixels.setPixelColor(0, pixels.Color(100, 100, 100));
+  pixels.setPixelColor(0, pixels.Color(150, 150, 150));
   pixels.show();
-  delay(100);
+  delay(50);
 }
 
 // BLE Callbacks
 class MyServerCallbacks : public NimBLEServerCallbacks {
   void onConnect(NimBLEServer* pServer, NimBLEConnInfo& connInfo) override {
-    Serial.printf("Connected: %s\n", connInfo.getAddress().toString().c_str());
-    
-    // Assign to an empty slot, prioritizing current slot if it's empty
-    if (slotConnHandles[currentSlot] == 0xFFFF) {
-        slotConnHandles[currentSlot] = connInfo.getConnHandle();
-    } else {
-        for (int i = 0; i < 4; i++) {
-            if (slotConnHandles[i] == 0xFFFF) {
-                slotConnHandles[i] = connInfo.getConnHandle();
-                break;
-            }
+    NimBLEAddress addr = connInfo.getAddress();
+    uint16_t handle = connInfo.getConnHandle();
+    Serial.printf("Connected: %s (Handle: %d)\n", addr.toString().c_str(), handle);
+
+    int targetSlot = -1;
+    // 1. Check if this address is already assigned to a slot
+    for (int i = 0; i < 4; i++) {
+      if (slotAddresses[i].equals(addr)) {
+        targetSlot = i;
+        break;
+      }
+    }
+
+    // 2. If new address, assign to first available slot (no address stored)
+    if (targetSlot == -1) {
+      for (int i = 0; i < 4; i++) {
+        if (slotAddresses[i].equals(NimBLEAddress("\0\0\0\0\0\0", 0))) {
+          targetSlot = i;
+          slotAddresses[i] = addr;
+          char key[8]; sprintf(key, "addr%d", i);
+          preferences.putBytes(key, addr.getBase(), 6);
+          Serial.printf("Assigned new device to slot %d\n", i + 1);
+          break;
         }
+      }
+    }
+
+    // 3. If all slots are full but this is a new connection, overwrite first disconnected slot
+    if (targetSlot == -1) {
+       for (int i = 0; i < 4; i++) {
+         if (slotConnHandles[i] == 0xFFFF) {
+           targetSlot = i;
+           slotAddresses[i] = addr;
+           char key[8]; sprintf(key, "addr%d", i);
+           preferences.putBytes(key, addr.getBase(), 6);
+           break;
+         }
+       }
+    }
+
+    if (targetSlot != -1) {
+      slotConnHandles[targetSlot] = handle;
     }
   }
 
   void onDisconnect(NimBLEServer* pServer, NimBLEConnInfo& connInfo, int reason) override {
-    Serial.printf("Disconnected, reason: %d\n", reason);
     uint16_t handle = connInfo.getConnHandle();
     for (int i = 0; i < 4; i++) {
-        if (slotConnHandles[i] == handle) {
-            slotConnHandles[i] = 0xFFFF;
-        }
+      if (slotConnHandles[i] == handle) {
+        slotConnHandles[i] = 0xFFFF;
+        Serial.printf("Disconnected from slot %d, reason: %d\n", i + 1, reason);
+      }
     }
-    // Restart advertising to allow others to connect
     NimBLEDevice::getAdvertising()->start();
   }
 };
 
 class MyUsbHost : public EspUsbHost {
 public:
-  void onKeyboardKey(uint8_t ascii, uint8_t keycode, uint8_t modifier) override {
-    // Intercept switching keys
-    bool isAlt = (modifier & 0x04) || (modifier & 0x40); // Left Alt or Right Alt
+  // Using onKeyboard for transparent bridge (supports long press and multiple keys)
+  void onKeyboard(hid_keyboard_report_t report, hid_keyboard_report_t last_report) override {
+    // Intercept switching keys within the report
+    for (int i = 0; i < 6; i++) {
+      uint8_t key = report.keycode[i];
+      if (key >= 0x68 && key <= 0x6B) { // F13 - F16
+        switchToSlot(key - 0x68);
+        return; 
+      }
+    }
     
-    if (keycode >= 0x68 && keycode <= 0x6B) { // F13 - F16
-      switchToSlot(keycode - 0x68);
-      return;
-    } 
-    
-    if (isAlt && (keycode >= 0x3A && keycode <= 0x3D)) { // Alt + F1-F4
-      switchToSlot(keycode - 0x3A);
-      return;
+    // Alt + F1-F4
+    bool isAlt = (report.modifier & 0x04) || (report.modifier & 0x40);
+    if (isAlt) {
+      for (int i = 0; i < 6; i++) {
+        uint8_t key = report.keycode[i];
+        if (key >= 0x3A && key <= 0x3D) { // F1 - F4
+          switchToSlot(key - 0x3A);
+          return;
+        }
+      }
     }
 
     uint16_t handle = slotConnHandles[currentSlot];
     if (handle != 0xFFFF && inputKeyboard) {
-        uint8_t report[8] = {modifier, 0, keycode, 0, 0, 0, 0, 0};
-        inputKeyboard->notify(report, sizeof(report), handle);
-        // Release key immediately for simplicity in this USB bridge
-        uint8_t release[8] = {0};
-        inputKeyboard->notify(release, sizeof(release), handle);
+      inputKeyboard->notify((uint8_t*)&report, sizeof(hid_keyboard_report_t), handle);
     }
   }
 
-  void onMouseAction(uint8_t buttons, int8_t x, int8_t y, int8_t wheel) override {
+  // Using onMouse to support horizontal scroll (Pan)
+  void onMouse(hid_mouse_report_t report, uint8_t last_buttons) override {
     uint16_t handle = slotConnHandles[currentSlot];
     if (handle != 0xFFFF && inputMouse) {
-        uint8_t report[4] = {buttons, (uint8_t)x, (uint8_t)y, (uint8_t)wheel};
-        inputMouse->notify(report, sizeof(report), handle);
+      // 5 bytes: Buttons, X, Y, Wheel, Pan
+      uint8_t buffer[5] = {report.buttons, (uint8_t)report.x, (uint8_t)report.y, (uint8_t)report.wheel, 0};
+      inputMouse->notify(buffer, sizeof(buffer), handle);
     }
   }
 };
@@ -140,12 +193,12 @@ void handleButton() {
   } else if (lastState == LOW && currentState == HIGH) {
     unsigned long duration = millis() - pressStart;
     if (duration > 2000) {
-      Serial.println("Long press: Clearing all bonds...");
-      for(int i=0; i<10; i++) {
-        pixels.setPixelColor(0, pixels.Color(100, 100, 100)); pixels.show(); delay(50);
-        pixels.setPixelColor(0, 0); pixels.show(); delay(50);
-      }
+      Serial.println("Long press: Clearing all bonds and slot mappings...");
       NimBLEDevice::deleteAllBonds();
+      for (int i = 0; i < 4; i++) {
+        char key[8]; sprintf(key, "addr%d", i);
+        preferences.remove(key);
+      }
       ESP.restart();
     } else if (duration > 50) {
       switchToSlot((currentSlot + 1) % 4);
@@ -163,39 +216,55 @@ void setup() {
   
   preferences.begin("ble-adapter", false);
   currentSlot = preferences.getInt("slot", 0);
+  // Load stored addresses for slots
+  for (int i = 0; i < 4; i++) {
+    char key[8]; sprintf(key, "addr%d", i);
+    uint8_t buf[6];
+    if (preferences.getBytes(key, buf, 6) == 6) {
+      slotAddresses[i] = NimBLEAddress(buf, 0);
+    } else {
+      slotAddresses[i] = NimBLEAddress("\0\0\0\0\0\0", 0);
+    }
+  }
 
   NimBLEDevice::init("M5 Multi Keyboard");
+  // Set security for better compatibility with Windows/iOS
+  NimBLEDevice::setSecurityAuth(true, true, true);
+  NimBLEDevice::setSecurityIOCap(BLE_HS_IO_NO_INPUT_OUTPUT);
+
   NimBLEServer* pServer = NimBLEDevice::createServer();
   pServer->setCallbacks(new MyServerCallbacks());
 
   hid = new NimBLEHIDDevice(pServer);
-  inputKeyboard = hid->inputReport(1); // Report ID 1: Keyboard
-  inputMouse = hid->inputReport(2);    // Report ID 2: Mouse
+  inputKeyboard = hid->getInputReport(1); // Report ID 1: Keyboard
+  inputMouse = hid->getInputReport(2);    // Report ID 2: Mouse
 
-  hid->manufacturer()->setValue("M5Stack");
-  hid->pnp(0x02, 0xe502, 0xa111, 0x0210);
-  hid->hidInfo(0x00, 0x01);
+  hid->setManufacturer("M5Stack");
+  hid->setPnp(0x02, 0xe502, 0xa111, 0x0210);
+  hid->setHidInfo(0x00, 0x01);
 
-  // USB HID Report Map for Keyboard + Mouse
+  // Updated Report Map for Keyboard + Mouse (with Pan)
   const uint8_t reportMap[] = {
+    // Keyboard
     0x05, 0x01, 0x09, 0x06, 0xa1, 0x01, 0x85, 0x01, 0x05, 0x07, 0x19, 0xe0, 0x29, 0xe7, 0x15, 0x00,
     0x25, 0x01, 0x75, 0x01, 0x95, 0x08, 0x81, 0x02, 0x95, 0x01, 0x75, 0x08, 0x81, 0x01, 0x95, 0x06,
     0x75, 0x08, 0x15, 0x00, 0x25, 0x65, 0x19, 0x00, 0x29, 0x65, 0x81, 0x00, 0xc0,
+    // Mouse (Buttons, X, Y, Wheel, Pan)
     0x05, 0x01, 0x09, 0x02, 0xa1, 0x01, 0x85, 0x02, 0x09, 0x01, 0xa1, 0x00, 0x05, 0x09, 0x19, 0x01,
     0x29, 0x03, 0x15, 0x00, 0x25, 0x01, 0x95, 0x03, 0x75, 0x01, 0x81, 0x02, 0x95, 0x01, 0x75, 0x05,
     0x81, 0x03, 0x05, 0x01, 0x09, 0x30, 0x09, 0x31, 0x09, 0x38, 0x15, 0x81, 0x25, 0x7f, 0x75, 0x08,
-    0x95, 0x03, 0x81, 0x06, 0xc0, 0xc0
+    0x95, 0x03, 0x81, 0x06, 0x05, 0x0c, 0x0a, 0x38, 0x02, 0x15, 0x81, 0x25, 0x7f, 0x75, 0x08, 0x95,
+    0x01, 0x81, 0x06, 0xc0, 0xc0
   };
-  hid->reportMap((uint8_t*)reportMap, sizeof(reportMap));
-  hid->startServices();
+  hid->setReportMap((uint8_t*)reportMap, sizeof(reportMap));
+  // hid->startServices(); // Deprecated: Services are started by the server
 
   NimBLEAdvertising* pAdvertising = NimBLEDevice::getAdvertising();
   pAdvertising->setAppearance(HID_KEYBOARD);
-  pAdvertising->addServiceUUID(hid->hidService()->getUUID());
-  pAdvertising->setScanResponse(false);
+  pAdvertising->addServiceUUID(hid->getHidService()->getUUID());
   pAdvertising->start();
 
-  Serial.println("BLE Multi-HID Ready");
+  Serial.println("BLE Multi-HID Bridge Ready");
   usbHost.begin();
 }
 
