@@ -109,24 +109,9 @@ class MyServerCallbacks : public NimBLEServerCallbacks {
         }
       }
 
-      // 2. 新規デバイスなら空きスロットへ
+      // 2. 新規デバイスの場合、現在選択されているスロットに割り当てる（上書き）
       if (targetSlot == -1) {
-        for (int i = 0; i < 4; i++) {
-          if (slotAddresses[i].isNull()) {
-            targetSlot = i;
-            break;
-          }
-        }
-      }
-
-      // 3. 空きがなければ、現在切断されている最初のスロットを上書き
-      if (targetSlot == -1) {
-         for (int i = 0; i < 4; i++) {
-           if (slotConnHandles[i] == 0xFFFF) {
-             targetSlot = i;
-             break;
-           }
-         }
+         targetSlot = currentSlot;
       }
 
       if (targetSlot != -1) {
@@ -246,30 +231,39 @@ void updateLED() {
 void handleButton() {
   static unsigned long pressStart = 0;
   static bool lastState = HIGH;
+  static bool longPressHandled = false; // 長押し処理済みフラグを追加
   bool currentState = digitalRead(PIN_BUTTON);
 
   if (lastState == HIGH && currentState == LOW) {
+    // ボタンが押された瞬間
     pressStart = millis();
-  } else if (lastState == LOW && currentState == HIGH) {
-    unsigned long duration = millis() - pressStart;
-    if (duration > 2000) {
+    longPressHandled = false;
+  } else if (currentState == LOW) {
+    // ボタンが押されている最中
+    if (!longPressHandled && (millis() - pressStart > 2000)) {
+      longPressHandled = true; // 繰り返し実行されるのを防ぐ
       Serial.println("Long press: Clearing all bonds and slot mappings...");
       
-      // ★ リセット成功のサインとしてLEDを白に点灯
+      // リセット成功のサインとしてLEDを白に点灯
       pixels.setPixelColor(0, pixels.Color(255, 255, 255));
       pixels.show();
       
       NimBLEDevice::deleteAllBonds();
-      preferences.remove("slot"); // 記憶しているスロット位置もリセット
+      preferences.remove("slot");
       for (int i = 0; i < 4; i++) {
         char key[8]; sprintf(key, "addr%d", i);
         preferences.remove(key);
       }
       
-      // ★ 白点灯を1秒間見せてから再起動（再起動後は自動的に赤色点滅に戻ります）
+      // 白点灯を1秒間見せてから再起動
       delay(1000);
       ESP.restart();
-    } else if (duration > 50) {
+    }
+  } else if (lastState == LOW && currentState == HIGH) {
+    // ボタンが離された瞬間
+    unsigned long duration = millis() - pressStart;
+    // 長押し処理がされておらず、単押し（50ms以上）の場合のみスロット切り替え
+    if (!longPressHandled && duration > 50) {
       switchToSlot((currentSlot + 1) % 4);
     }
   }
