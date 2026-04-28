@@ -67,9 +67,9 @@ class MyServerCallbacks : public NimBLEServerCallbacks {
     Serial.printf("Connected: %s (Handle: %d)\n", addr.toString().c_str(), handle);
 
     int targetSlot = -1;
-    // 1. Check if this address is already assigned to a slot
+    // 1. Check if this address is already assigned to a slot (Byte-wise comparison is safer for Identity Addresses)
     for (int i = 0; i < 4; i++) {
-      if (slotAddresses[i].equals(addr)) {
+      if (memcmp(slotAddresses[i].getBase(), addr.getBase(), 6) == 0) {
         targetSlot = i;
         break;
       }
@@ -78,11 +78,14 @@ class MyServerCallbacks : public NimBLEServerCallbacks {
     // 2. If new address, assign to first available slot (no address stored)
     if (targetSlot == -1) {
       for (int i = 0; i < 4; i++) {
-        if (slotAddresses[i].equals(NimBLEAddress("\0\0\0\0\0\0", 0))) {
+        if (memcmp(slotAddresses[i].getBase(), "\0\0\0\0\0\0", 6) == 0) {
           targetSlot = i;
           slotAddresses[i] = addr;
           char key[8]; sprintf(key, "addr%d", i);
-          preferences.putBytes(key, addr.getBase(), 6);
+          uint8_t saveBuf[7];
+          saveBuf[0] = addr.getType();
+          memcpy(&saveBuf[1], addr.getBase(), 6);
+          preferences.putBytes(key, saveBuf, 7);
           Serial.printf("Assigned new device to slot %d\n", i + 1);
           break;
         }
@@ -96,7 +99,10 @@ class MyServerCallbacks : public NimBLEServerCallbacks {
            targetSlot = i;
            slotAddresses[i] = addr;
            char key[8]; sprintf(key, "addr%d", i);
-           preferences.putBytes(key, addr.getBase(), 6);
+           uint8_t saveBuf[7];
+           saveBuf[0] = addr.getType();
+           memcpy(&saveBuf[1], addr.getBase(), 6);
+           preferences.putBytes(key, saveBuf, 7);
            break;
          }
        }
@@ -216,12 +222,16 @@ void setup() {
   
   preferences.begin("ble-adapter", false);
   currentSlot = preferences.getInt("slot", 0);
-  // Load stored addresses for slots
+  // Load stored addresses for slots (7 bytes: type + address)
   for (int i = 0; i < 4; i++) {
     char key[8]; sprintf(key, "addr%d", i);
-    uint8_t buf[6];
-    if (preferences.getBytes(key, buf, 6) == 6) {
-      slotAddresses[i] = NimBLEAddress(buf, 0);
+    uint8_t buf[7];
+    size_t len = preferences.getBytes(key, buf, 7);
+    if (len == 7) {
+      slotAddresses[i] = NimBLEAddress(&buf[1], buf[0]);
+    } else if (len == 6) {
+      // Compatibility with old 6-byte format
+      slotAddresses[i] = NimBLEAddress(buf, 0); 
     } else {
       slotAddresses[i] = NimBLEAddress("\0\0\0\0\0\0", 0);
     }
