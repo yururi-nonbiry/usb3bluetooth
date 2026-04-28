@@ -111,6 +111,11 @@ class MyServerCallbacks : public NimBLEServerCallbacks {
     if (targetSlot != -1) {
       slotConnHandles[targetSlot] = handle;
     }
+
+    // Restart advertising if not at max connections to allow other devices to reconnect
+    if (pServer->getConnectedCount() < CONFIG_BT_NIMBLE_MAX_CONNECTIONS) {
+      NimBLEDevice::startAdvertising();
+    }
   }
 
   void onDisconnect(NimBLEServer* pServer, NimBLEConnInfo& connInfo, int reason) override {
@@ -202,11 +207,19 @@ public:
       // If length is 4-8 bytes, we attempt to pass it through
       if (transfer->actual_num_bytes >= 3 && transfer->actual_num_bytes <= 8) {
         Serial.printf("Mouse moved (Raw, Len: %d)\n", transfer->actual_num_bytes);
-        // We use a 5-byte buffer to match our BLE descriptor
         uint8_t buffer[5] = {0};
-        // Simple heuristic: Buttons are usually byte 0 (or byte 1 if ID present)
-        // This is a "best effort" bridge for non-boot mice
-        memcpy(buffer, transfer->data_buffer, (transfer->actual_num_bytes > 5) ? 5 : transfer->actual_num_bytes);
+        
+        // Check for Report ID and shift if necessary
+        int offset = 0;
+        // Mouse Report ID is usually 1-4
+        if (transfer->data_buffer[0] > 0 && transfer->data_buffer[0] <= 4 && transfer->actual_num_bytes >= 4) {
+          offset = 1; 
+        }
+        
+        int copy_len = transfer->actual_num_bytes - offset;
+        if (copy_len > 5) copy_len = 5;
+        
+        memcpy(buffer, &transfer->data_buffer[offset], copy_len);
         inputMouse->notify(buffer, sizeof(buffer), handle);
       }
     }
