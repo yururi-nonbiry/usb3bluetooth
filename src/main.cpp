@@ -123,6 +123,27 @@ class MyServerCallbacks : public NimBLEServerCallbacks {
     }
     NimBLEDevice::getAdvertising()->start();
   }
+
+  void onAuthenticationComplete(NimBLEConnInfo& connInfo) override {
+    if (connInfo.isBonded()) {
+      uint16_t handle = connInfo.getConnHandle();
+      NimBLEAddress addr = connInfo.getIdAddress();
+      for (int i = 0; i < 4; i++) {
+        if (slotConnHandles[i] == handle) {
+          if (!slotAddresses[i].equals(addr)) {
+            Serial.printf("Updating slot %d address to IA: %s\n", i + 1, addr.toString().c_str());
+            slotAddresses[i] = addr;
+            char key[8]; sprintf(key, "addr%d", i);
+            uint8_t saveBuf[7];
+            saveBuf[0] = addr.getType();
+            memcpy(&saveBuf[1], addr.getBase(), 6);
+            preferences.putBytes(key, saveBuf, 7);
+          }
+          break;
+        }
+      }
+    }
+  }
 };
 
 class MyUsbHost : public EspUsbHost {
@@ -164,6 +185,30 @@ public:
       // 5 bytes: Buttons, X, Y, Wheel, Pan
       uint8_t buffer[5] = {report.buttons, (uint8_t)report.x, (uint8_t)report.y, (uint8_t)report.wheel, 0};
       inputMouse->notify(buffer, sizeof(buffer), handle);
+    }
+  }
+
+  // Handle raw HID data if onMouse/onKeyboard didn't catch it (e.g. non-boot protocol)
+  void onReceive(const usb_transfer_t *transfer) override {
+    uint8_t ep_num = (transfer->bEndpointAddress & 0x0F);
+    auto& ep_data = endpoint_data_list[ep_num];
+    
+    // Only process if it's a HID interface and not handled by boot protocol callbacks
+    if (ep_data.bInterfaceClass == 0x03 && ep_data.bInterfaceProtocol == 0) {
+      uint16_t handle = slotConnHandles[currentSlot];
+      if (handle == 0xFFFF || !inputMouse) return;
+
+      // Keyball44 trackball often sends data that looks like a mouse report
+      // If length is 4-8 bytes, we attempt to pass it through
+      if (transfer->actual_num_bytes >= 3 && transfer->actual_num_bytes <= 8) {
+        Serial.printf("Mouse moved (Raw, Len: %d)\n", transfer->actual_num_bytes);
+        // We use a 5-byte buffer to match our BLE descriptor
+        uint8_t buffer[5] = {0};
+        // Simple heuristic: Buttons are usually byte 0 (or byte 1 if ID present)
+        // This is a "best effort" bridge for non-boot mice
+        memcpy(buffer, transfer->data_buffer, (transfer->actual_num_bytes > 5) ? 5 : transfer->actual_num_bytes);
+        inputMouse->notify(buffer, sizeof(buffer), handle);
+      }
     }
   }
 };
@@ -251,7 +296,8 @@ void setup() {
   inputMouse = hid->getInputReport(2);    // Report ID 2: Mouse
 
   hid->setManufacturer("Espressif");
-  hid->setPnp(0x02, 0xe502, 0xa111, 0x0210);
+  // Set PnP ID to Apple (0x05ac) for better compatibility with some hosts
+  hid->setPnp(0x02, 0x05ac, 0x820a, 0x0210);
   hid->setHidInfo(0x00, 0x01);
 
   // Updated Report Map for Keyboard + Mouse (with Pan)
@@ -268,11 +314,11 @@ void setup() {
     0x01, 0x81, 0x06, 0xc0, 0xc0
   };
   hid->setReportMap((uint8_t*)reportMap, sizeof(reportMap));
-  // hid->startServices(); // Deprecated: Services are started by the server
 
   NimBLEAdvertising* pAdvertising = NimBLEDevice::getAdvertising();
-  pAdvertising->setAppearance(0x03C0); // Generic HID
+  pAdvertising->setAppearance(0x03C1); // HID Keyboard (Combo)
   pAdvertising->addServiceUUID(hid->getHidService()->getUUID());
+  pAdvertising->enableScanResponse(false);
   pAdvertising->start();
 
   Serial.println("BLE Multi-HID Bridge Ready");
