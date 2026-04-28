@@ -209,6 +209,9 @@ public:
 MyUsbHost usbHost;
 
 void updateLED() {
+  // If button is held, let handleButton control the LED
+  if (digitalRead(PIN_BUTTON) == LOW) return;
+
   static unsigned long lastMillis = 0;
   static bool toggle = false;
   
@@ -228,42 +231,66 @@ void updateLED() {
   pixels.show();
 }
 
+void resetCurrentSlot() {
+  Serial.printf("Resetting slot %d...\n", currentSlot + 1);
+  NimBLEAddress addr = slotAddresses[currentSlot];
+  if (!addr.isNull()) {
+    NimBLEDevice::deleteBond(addr);
+  }
+  slotAddresses[currentSlot] = NimBLEAddress("\0\0\0\0\0\0", 0);
+  char key[8]; sprintf(key, "addr%d", currentSlot);
+  preferences.remove(key);
+  
+  // Feedback
+  pixels.setPixelColor(0, pixels.Color(255, 255, 255));
+  pixels.show();
+  delay(500);
+  ESP.restart();
+}
+
+void factoryReset() {
+  Serial.println("Factory Reset...");
+  NimBLEDevice::deleteAllBonds();
+  preferences.clear();
+  
+  // Feedback
+  pixels.setPixelColor(0, pixels.Color(255, 0, 0));
+  pixels.show();
+  delay(1000);
+  ESP.restart();
+}
+
 void handleButton() {
   static unsigned long pressStart = 0;
   static bool lastState = HIGH;
-  static bool longPressHandled = false; // 長押し処理済みフラグを追加
   bool currentState = digitalRead(PIN_BUTTON);
 
   if (lastState == HIGH && currentState == LOW) {
-    // ボタンが押された瞬間
+    // Button pressed
     pressStart = millis();
-    longPressHandled = false;
   } else if (currentState == LOW) {
-    // ボタンが押されている最中
-    if (!longPressHandled && (millis() - pressStart > 2000)) {
-      longPressHandled = true; // 繰り返し実行されるのを防ぐ
-      Serial.println("Long press: Clearing all bonds and slot mappings...");
-      
-      // リセット成功のサインとしてLEDを白に点灯
-      pixels.setPixelColor(0, pixels.Color(255, 255, 255));
+    // Button being held - provide feedback
+    unsigned long duration = millis() - pressStart;
+    if (duration > 5000) {
+      // > 5s: Factory Reset Feedback (Fast Red Blink)
+      if ((millis() / 100) % 2 == 0) pixels.setPixelColor(0, pixels.Color(200, 0, 0));
+      else pixels.setPixelColor(0, 0);
       pixels.show();
-      
-      NimBLEDevice::deleteAllBonds();
-      preferences.remove("slot");
-      for (int i = 0; i < 4; i++) {
-        char key[8]; sprintf(key, "addr%d", i);
-        preferences.remove(key);
-      }
-      
-      // 白点灯を1秒間見せてから再起動
-      delay(1000);
-      ESP.restart();
+    } else if (duration > 2000) {
+      // 2s - 5s: Slot Reset Feedback (Fast White Blink)
+      if ((millis() / 100) % 2 == 0) pixels.setPixelColor(0, pixels.Color(150, 150, 150));
+      else pixels.setPixelColor(0, 0);
+      pixels.show();
     }
   } else if (lastState == LOW && currentState == HIGH) {
-    // ボタンが離された瞬間
+    // Button released
     unsigned long duration = millis() - pressStart;
-    // 長押し処理がされておらず、単押し（50ms以上）の場合のみスロット切り替え
-    if (!longPressHandled && duration > 50) {
+    if (duration > 5000) {
+      factoryReset();
+    } else if (duration > 2000) {
+      resetCurrentSlot();
+    } else if (duration > 50) {
+      // Short press: Switch slot
       switchToSlot((currentSlot + 1) % 4);
     }
   }
