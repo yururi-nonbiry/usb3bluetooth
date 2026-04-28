@@ -62,7 +62,7 @@ void switchToSlot(int slot) {
 // BLE Callbacks
 class MyServerCallbacks : public NimBLEServerCallbacks {
   void onConnect(NimBLEServer* pServer, NimBLEConnInfo& connInfo) override {
-    NimBLEAddress addr = connInfo.getAddress();
+    NimBLEAddress addr = connInfo.getIdAddress();
     uint16_t handle = connInfo.getConnHandle();
     Serial.printf("Connected: %s (Handle: %d)\n", addr.toString().c_str(), handle);
 
@@ -158,6 +158,7 @@ public:
 
   // Using onMouse to support horizontal scroll (Pan)
   void onMouse(hid_mouse_report_t report, uint8_t last_buttons) override {
+    Serial.println("Mouse moved");
     uint16_t handle = slotConnHandles[currentSlot];
     if (handle != 0xFFFF && inputMouse) {
       // 5 bytes: Buttons, X, Y, Wheel, Pan
@@ -270,7 +271,7 @@ void setup() {
   // hid->startServices(); // Deprecated: Services are started by the server
 
   NimBLEAdvertising* pAdvertising = NimBLEDevice::getAdvertising();
-  pAdvertising->setAppearance(HID_KEYBOARD);
+  pAdvertising->setAppearance(0x03C0); // Generic HID
   pAdvertising->addServiceUUID(hid->getHidService()->getUUID());
   pAdvertising->start();
 
