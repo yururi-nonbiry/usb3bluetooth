@@ -5,8 +5,8 @@
 #include <NimBLEDevice.h>
 #include <NimBLEHIDDevice.h>
 
-// Pins for M5Stamp S3
-#define PIN_LED 21
+// Pins for ESP32-S3 DevKit
+#define PIN_LED 48
 #define PIN_BUTTON 0
 
 // Global state
@@ -227,7 +227,7 @@ void setup() {
     }
   }
 
-  NimBLEDevice::init("M5 Multi Keyboard");
+  NimBLEDevice::init("ESP32-S3 Keyboard");
   // Set security for better compatibility with Windows/iOS
   NimBLEDevice::setSecurityAuth(true, true, true);
   NimBLEDevice::setSecurityIOCap(BLE_HS_IO_NO_INPUT_OUTPUT);
@@ -239,7 +239,7 @@ void setup() {
   inputKeyboard = hid->getInputReport(1); // Report ID 1: Keyboard
   inputMouse = hid->getInputReport(2);    // Report ID 2: Mouse
 
-  hid->setManufacturer("M5Stack");
+  hid->setManufacturer("Espressif");
   hid->setPnp(0x02, 0xe502, 0xa111, 0x0210);
   hid->setHidInfo(0x00, 0x01);
 

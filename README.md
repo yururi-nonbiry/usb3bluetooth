@@ -1,6 +1,6 @@
-# usb3bluetooth (M5Stamp S3 USB to BLE Bridge)
+# usb3bluetooth (ESP32-S3 USB to BLE Bridge)
 
-M5Stamp S3を使用して、有線USBキーボードやマウスをBluetooth (BLE) で接続できるようにするアダプターです。
+ESP32-S3を使用して、有線USBキーボードやマウスをBluetooth (BLE) で接続できるようにするアダプターです。
 
 ## 主な機能
 - **マルチデバイス対応**: 最大4台のデバイスとペアリングし、即座に切り替えて使用できます。
@@ -10,7 +10,7 @@ M5Stamp S3を使用して、有線USBキーボードやマウスをBluetooth (BL
 ## デバイスの切り替え方法
 以下の3つの方法で接続先（スロット）を切り替えることができます。
 
-1. **本体ボタン**: M5Stamp S3のボタンを短押しするごとにスロットが切り替わります。
+1. **本体ボタン**: ESP32-S3のBOOTボタン（GPIO 0）を短押しするごとにスロットが切り替わります。
 2. **キーボードショートカット (通常キーボード向け)**:
    - `Alt + F1`: スロット1
    - `Alt + F2`: スロット2
@@ -36,6 +36,6 @@ M5Stamp S3を使用して、有線USBキーボードやマウスをBluetooth (BL
 - **本体ボタン長押し (2秒以上)**: 全てのペアリング情報（Bond情報）を削除し、再起動します。
 
 ## 開発環境
-- PlatformIO (M5Stamp S3)
+- PlatformIO (ESP32-S3-DevKitC-1)
 - NimBLE-Arduino
 - EspUsbHost
