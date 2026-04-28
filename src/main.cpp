@@ -254,11 +254,20 @@ void handleButton() {
     unsigned long duration = millis() - pressStart;
     if (duration > 2000) {
       Serial.println("Long press: Clearing all bonds and slot mappings...");
+      
+      // ★ リセット成功のサインとしてLEDを白に点灯
+      pixels.setPixelColor(0, pixels.Color(255, 255, 255));
+      pixels.show();
+      
       NimBLEDevice::deleteAllBonds();
+      preferences.remove("slot"); // 記憶しているスロット位置もリセット
       for (int i = 0; i < 4; i++) {
         char key[8]; sprintf(key, "addr%d", i);
         preferences.remove(key);
       }
+      
+      // ★ 白点灯を1秒間見せてから再起動（再起動後は自動的に赤色点滅に戻ります）
+      delay(1000);
       ESP.restart();
     } else if (duration > 50) {
       switchToSlot((currentSlot + 1) % 4);
@@ -295,6 +304,10 @@ void setup() {
   // Set security for better compatibility with Windows/iOS
   NimBLEDevice::setSecurityAuth(true, true, true);
   NimBLEDevice::setSecurityIOCap(BLE_HS_IO_NO_INPUT_OUTPUT);
+  
+  // ★ ここから下の2行を追加：ランダムMACアドレスを解決するためのキー交換を強制する
+  NimBLEDevice::setSecurityInitKey(BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID);
+  NimBLEDevice::setSecurityRespKey(BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID);
 
   NimBLEServer* pServer = NimBLEDevice::createServer();
   pServer->setCallbacks(new MyServerCallbacks());
