@@ -66,53 +66,18 @@ class MyServerCallbacks : public NimBLEServerCallbacks {
     uint16_t handle = connInfo.getConnHandle();
     Serial.printf("Connected: %s (Handle: %d)\n", addr.toString().c_str(), handle);
 
-    int targetSlot = -1;
-    // 1. Check if this address is already assigned to a slot (Byte-wise comparison is safer for Identity Addresses)
+    // 既存スロットか確認（MACアドレスの6バイトのみで比較し、型の違いによる不一致を回避）
     for (int i = 0; i < 4; i++) {
-      if (slotAddresses[i] == addr) {
-        targetSlot = i;
+      if (!slotAddresses[i].isNull() && memcmp(slotAddresses[i].getVal(), addr.getVal(), 6) == 0) {
+        slotConnHandles[i] = handle;
+        Serial.printf("Reconnected to slot %d\n", i + 1);
         break;
       }
     }
+    // 注意: ここでは新規デバイスのスロット割り当て（上書き）を行わない。
+    // RPA（ランダムアドレス）未解決による既存スロットの破壊を防ぐため。
 
-    // 2. If new address, assign to first available slot (no address stored)
-    if (targetSlot == -1) {
-      for (int i = 0; i < 4; i++) {
-        if (slotAddresses[i].isNull()) {
-          targetSlot = i;
-          slotAddresses[i] = addr;
-          char key[8]; sprintf(key, "addr%d", i);
-          uint8_t saveBuf[7];
-          saveBuf[0] = addr.getType();
-          memcpy(&saveBuf[1], addr.getVal(), 6);
-          preferences.putBytes(key, saveBuf, 7);
-          Serial.printf("Assigned new device to slot %d\n", i + 1);
-          break;
-        }
-      }
-    }
-
-    // 3. If all slots are full but this is a new connection, overwrite first disconnected slot
-    if (targetSlot == -1) {
-       for (int i = 0; i < 4; i++) {
-         if (slotConnHandles[i] == 0xFFFF) {
-           targetSlot = i;
-           slotAddresses[i] = addr;
-           char key[8]; sprintf(key, "addr%d", i);
-           uint8_t saveBuf[7];
-           saveBuf[0] = addr.getType();
-           memcpy(&saveBuf[1], addr.getVal(), 6);
-           preferences.putBytes(key, saveBuf, 7);
-           break;
-         }
-       }
-    }
-
-    if (targetSlot != -1) {
-      slotConnHandles[targetSlot] = handle;
-    }
-
-    // Restart advertising if not at max connections to allow other devices to reconnect
+    // 最大接続数未満ならアドバタイズを再開（前回の修正）
     if (pServer->getConnectedCount() < CONFIG_BT_NIMBLE_MAX_CONNECTIONS) {
       NimBLEDevice::startAdvertising();
     }
@@ -132,19 +97,49 @@ class MyServerCallbacks : public NimBLEServerCallbacks {
   void onAuthenticationComplete(NimBLEConnInfo& connInfo) override {
     if (connInfo.isBonded()) {
       uint16_t handle = connInfo.getConnHandle();
-      NimBLEAddress addr = connInfo.getIdAddress();
+      NimBLEAddress addr = connInfo.getIdAddress(); // 暗号化完了後は確実に本来のIDアドレスが取得できる
+      
+      int targetSlot = -1;
+
+      // 1. 既存デバイスかチェック
       for (int i = 0; i < 4; i++) {
-        if (slotConnHandles[i] == handle) {
-          if (!slotAddresses[i].equals(addr)) {
-            Serial.printf("Updating slot %d address to IA: %s\n", i + 1, addr.toString().c_str());
-            slotAddresses[i] = addr;
-            char key[8]; sprintf(key, "addr%d", i);
-            uint8_t saveBuf[7];
-            saveBuf[0] = addr.getType();
-            memcpy(&saveBuf[1], addr.getVal(), 6);
-            preferences.putBytes(key, saveBuf, 7);
-          }
+        if (!slotAddresses[i].isNull() && memcmp(slotAddresses[i].getVal(), addr.getVal(), 6) == 0) {
+          targetSlot = i;
           break;
+        }
+      }
+
+      // 2. 新規デバイスなら空きスロットへ
+      if (targetSlot == -1) {
+        for (int i = 0; i < 4; i++) {
+          if (slotAddresses[i].isNull()) {
+            targetSlot = i;
+            break;
+          }
+        }
+      }
+
+      // 3. 空きがなければ、現在切断されている最初のスロットを上書き
+      if (targetSlot == -1) {
+         for (int i = 0; i < 4; i++) {
+           if (slotConnHandles[i] == 0xFFFF) {
+             targetSlot = i;
+             break;
+           }
+         }
+      }
+
+      if (targetSlot != -1) {
+        slotConnHandles[targetSlot] = handle;
+        // アドレス情報が新しい場合のみNVS（Preferences）に保存
+        if (memcmp(slotAddresses[targetSlot].getVal(), addr.getVal(), 6) != 0) {
+          Serial.printf("Updating slot %d address to IA: %s\n", targetSlot + 1, addr.toString().c_str());
+          slotAddresses[targetSlot] = addr;
+          char key[8]; sprintf(key, "addr%d", targetSlot);
+          uint8_t saveBuf[7];
+          saveBuf[0] = addr.getType();
+          memcpy(&saveBuf[1], addr.getVal(), 6);
+          preferences.putBytes(key, saveBuf, 7);
         }
       }
     }
@@ -328,12 +323,18 @@ void setup() {
   };
   hid->setReportMap((uint8_t*)reportMap, sizeof(reportMap));
 
+  // ★ 追加: バッテリーサービスを有効化し、ダミーの100%を通知（Apple端末対策）
+  hid->setBatteryLevel(100);
+
   pServer->start();
 
   NimBLEAdvertising* pAdvertising = NimBLEDevice::getAdvertising();
   pAdvertising->setAppearance(0x03C1); // HID Keyboard (Combo)
   pAdvertising->addServiceUUID(hid->getHidService()->getUUID());
-  pAdvertising->enableScanResponse(false);
+  
+  // ★ 変更: false から true に変更（Windows/Macの再接続対策）
+  pAdvertising->enableScanResponse(true); 
+  
   pAdvertising->start();
 
   Serial.println("BLE Multi-HID Bridge Ready");
