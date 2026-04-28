@@ -69,7 +69,7 @@ class MyServerCallbacks : public NimBLEServerCallbacks {
     int targetSlot = -1;
     // 1. Check if this address is already assigned to a slot (Byte-wise comparison is safer for Identity Addresses)
     for (int i = 0; i < 4; i++) {
-      if (memcmp(slotAddresses[i].getBase(), addr.getBase(), 6) == 0) {
+      if (slotAddresses[i] == addr) {
         targetSlot = i;
         break;
       }
@@ -78,13 +78,13 @@ class MyServerCallbacks : public NimBLEServerCallbacks {
     // 2. If new address, assign to first available slot (no address stored)
     if (targetSlot == -1) {
       for (int i = 0; i < 4; i++) {
-        if (memcmp(slotAddresses[i].getBase(), "\0\0\0\0\0\0", 6) == 0) {
+        if (slotAddresses[i].isNull()) {
           targetSlot = i;
           slotAddresses[i] = addr;
           char key[8]; sprintf(key, "addr%d", i);
           uint8_t saveBuf[7];
           saveBuf[0] = addr.getType();
-          memcpy(&saveBuf[1], addr.getBase(), 6);
+          memcpy(&saveBuf[1], addr.getVal(), 6);
           preferences.putBytes(key, saveBuf, 7);
           Serial.printf("Assigned new device to slot %d\n", i + 1);
           break;
@@ -101,7 +101,7 @@ class MyServerCallbacks : public NimBLEServerCallbacks {
            char key[8]; sprintf(key, "addr%d", i);
            uint8_t saveBuf[7];
            saveBuf[0] = addr.getType();
-           memcpy(&saveBuf[1], addr.getBase(), 6);
+           memcpy(&saveBuf[1], addr.getVal(), 6);
            preferences.putBytes(key, saveBuf, 7);
            break;
          }
@@ -136,7 +136,7 @@ class MyServerCallbacks : public NimBLEServerCallbacks {
             char key[8]; sprintf(key, "addr%d", i);
             uint8_t saveBuf[7];
             saveBuf[0] = addr.getType();
-            memcpy(&saveBuf[1], addr.getBase(), 6);
+            memcpy(&saveBuf[1], addr.getVal(), 6);
             preferences.putBytes(key, saveBuf, 7);
           }
           break;
@@ -314,6 +314,8 @@ void setup() {
     0x01, 0x81, 0x06, 0xc0, 0xc0
   };
   hid->setReportMap((uint8_t*)reportMap, sizeof(reportMap));
+
+  pServer->start();
 
   NimBLEAdvertising* pAdvertising = NimBLEDevice::getAdvertising();
   pAdvertising->setAppearance(0x03C1); // HID Keyboard (Combo)
